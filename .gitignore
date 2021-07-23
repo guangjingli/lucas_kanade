@@ -1,0 +1,16 @@
+*.sw[a-z]
+*~
+.vscode
+*/cmake-build-debug
+*/.idea
+.idea
+cmake-build-debug
+__init__.py
+.trt
+
+/test_data
+build/
+**/.cache/**
+html/
+logs
+
