@@ -41,7 +41,7 @@ int main(){
         return 0;
     }
 
-    cv::Mat image_target = transformImage(image_source, 0.0F, 20, 5);
+    cv::Mat image_target = transformImage(image_source, 2.0F, 20, 5);
 
     cv::Mat im_target_gray, im_source_gray;
     cv::cvtColor(image_source, im_source_gray, CV_BGR2GRAY);
@@ -54,12 +54,13 @@ int main(){
     im_target_gray.convertTo(im_target_gray, CV_32F, 1 / 255.0);
     im_source_gray.convertTo(im_source_gray, CV_32F, 1 / 255.0);
 
-    cv::Mat result;
-    LucasKanada lucas_kanada;
+    cv::Mat result(1, 3, CV_32F);
+    LucasKanda::LucasKanada lucas_kanada;
 
     lucas_kanada.align(im_target_gray, im_source_gray, result);
 
+    std::cout << "result: (x, y, theta) = (" << result.at<float>(0, 0) << ","
+              << result.at<float>(0, 1) << "," << result.at<float>(0, 2) * 180.0F / M_PI << ")" << std::endl;
 
     return 0;
-
 }

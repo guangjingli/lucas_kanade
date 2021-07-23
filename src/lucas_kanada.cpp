@@ -4,6 +4,7 @@
 
 #include "lucas_kanada.h"
 
+using namespace LucasKanda;
 
 static constexpr float half_window_size_ = 100.0F;
 
@@ -16,19 +17,25 @@ static constexpr float half_window_size_ = 100.0F;
  * */
 void LucasKanada::align(const cv::Mat &target_mat, const cv::Mat &source_mat, cv::Mat &tf) {
 
+    assert(tf.rows == 1);
+    assert(tf.cols == 3);
+
+
     source_mat_x_gradient_.release();
     source_mat_y_gradient_.release();
 
     cv::Point2f location = cv::Point2f(source_mat.cols/2.0f, source_mat.rows/2.0f);
-    std::cout << location.x << ", " << location.y << std::endl;
 
-    cv::Point2f tf_ = lucas_kanada_least_squares(target_mat, source_mat, location);
+    Velocity tf_ = lucas_kanada_least_squares(target_mat, source_mat, location);
 
-    std::cout << tf_.x << ", " << tf_.y << std::endl;
+    tf.at<float>(0, 0) = -tf_.x;
+    tf.at<float>(0, 1) = -tf_.y;
+    tf.at<float>(0, 2) = tf_.theta;
 
+    return;
 }
 
-cv::Point2f LucasKanada::lucas_kanada_least_squares(const cv::Mat &target, const cv::Mat &source, const cv::Point2f &loc) {
+Velocity LucasKanada::lucas_kanada_least_squares(const cv::Mat &target, const cv::Mat &source, const cv::Point2f &loc) {
     source_mat_x_gradient_ = compute_derivatives(source, "x");
     source_mat_y_gradient_ = compute_derivatives(source, "y");
     cv::Mat source_mat_gardient = abs(source_mat_x_gradient_) + abs(source_mat_y_gradient_);
@@ -39,27 +46,32 @@ cv::Point2f LucasKanada::lucas_kanada_least_squares(const cv::Mat &target, const
      constexpr size_t MAX_ITERS = 20;
 
      cv::Point2f loc_cur_iter = loc;
-     cv::Point2f optimization_vars;
-     optimization_vars.x = 0;
-     optimization_vars.y = 0;
+    Velocity optimization_vars;
+     optimization_vars.x = 0.0F;
+     optimization_vars.y = 0.0F;
+     optimization_vars.theta = 0.0F;
 
      for(size_t iter = 0; iter < MAX_ITERS; ++iter){
          const cv::Mat J = compute_jacobian(optimization_vars, loc_cur_iter, source_mat_x_gradient_, source_mat_y_gradient_);
 
          const cv::Mat b = compute_b(optimization_vars, loc_cur_iter, source, target);
 
-         cv::Point2f delta = solve_normal_equation(J, b);
+         Velocity delta = solve_normal_equation(J, b);
 
-         optimization_vars += delta;
+         optimization_vars = optimization_vars.add(delta);
          // Minus because of dx,dy is modeled as last_x + dx = cur_x;   source + dx = target
-         loc_cur_iter -= delta;
+         loc_cur_iter -= {delta.x, delta.y};
 
-         std::cout << "MAX_ITERS_" <<  iter << "\tdelta=(" << delta.x << "," << delta.y << ")=" << delta.dot(delta) << "\toptimization_vars=("
-                   << optimization_vars.x << "," << optimization_vars.y << ") loc_iter: (" << loc_cur_iter.x << ", " << loc_cur_iter.y << ") "  << std::endl;
+         std::cout << "MAX_ITERS_" <<  iter << "\tdelta=(" << delta.x << "," << delta.y << "," << delta.theta << ")"
+                   << "\toptimization_vars=(" << optimization_vars.x << "," << optimization_vars.y << ", " << optimization_vars.theta
+                   << ") loc_iter: (" << loc_cur_iter.x << ", " << loc_cur_iter.y << ") "  << std::endl;
 
-         if(delta.dot(delta) < 1e-4){
+         if(fabs(delta.x)< 0.1 && fabs(delta.y) < 0.1 && fabs(delta.theta * 180.0 / M_PI) < 0.1F){
              break;
          }
+//         if(delta.dot(delta) < 1e-4){
+//             break;
+//         }
      }
      return optimization_vars;
 }
@@ -88,24 +100,57 @@ cv::Mat LucasKanada::compute_derivatives(const cv::Mat& src, const std::string& 
     return result;
 }
 
-cv::Mat LucasKanada::compute_jacobian(const cv::Point2f &velocity,
+
+cv::Mat compute_jacobian_of_xy_wrt_se2(
+        const cv::Point2f& xy,
+        const Velocity& velocity)
+{
+    const float sint = std::sin(velocity.theta);
+    const float cost = std::cos(velocity.theta);
+    const float x = xy.x;
+    const float y = xy.y;
+    // Technically, it is (so2 + t2)
+    // (x2, y2) = T(p) = R * (x1, y1) + t
+    cv::Mat jacobian_xy_wrt_se2 = (cv::Mat_<float>(2, 3)
+            << -sint * x - cost * y,
+            1, 0,
+            cost * x - sint * y, 0, 1.);
+    return jacobian_xy_wrt_se2;
+}
+
+cv::Mat LucasKanada::compute_jacobian(const Velocity &velocity,
                                       const cv::Point2f &loc,
                                       const cv::Mat &x_gradient,
                                       const cv::Mat &y_gradient) {
 
     const int patch_size = (half_window_size_ * 2 + 1) * (half_window_size_ * 2 + 1);
-    cv::Mat jacobian(patch_size, 2, CV_32F);
+    cv::Mat jacobian(patch_size, 3, CV_32F);
 
     size_t count = 0;
     // The 2 for loops can be generalized by a kernal function.
     for (float y = loc.y - half_window_size_; y <= loc.y + half_window_size_ + 1e-6; y += 1.) {
         for (float x = loc.x - half_window_size_; x <= loc.x + half_window_size_ + 1e-6; x += 1.) {
-            const float last_x = x + velocity.x;
-            const float last_y = y + velocity.y;
-            // dx
-            jacobian.at<float>(count, 0) = -bilinear_interp(x_gradient, { last_x, last_y });
-            // dy
-            jacobian.at<float>(count, 1) = -bilinear_interp(y_gradient, { last_x, last_y });
+//            const float last_x = x + velocity.x;
+//            const float last_y = y + velocity.y;
+//            //dx
+//            jacobian.at<float>(count, 0) = -bilinear_interp(x_gradient, { last_x, last_y });
+//            //dy
+//            jacobian.at<float>(count, 1) = -bilinear_interp(y_gradient, { last_x, last_y });
+//            ++count;
+            cv::Point2f delta(x-loc.x, y-loc.y);
+
+            const auto last_p = velocity.apply(delta) + loc;
+            const cv::Mat jacobian_xy_wrt_se2 = compute_jacobian_of_xy_wrt_se2(delta, velocity);
+            const cv::Mat jacobian_pixel_wrt_xy = (cv::Mat_<float>(1, 2)
+                    << bilinear_interp(x_gradient, last_p), bilinear_interp(y_gradient, last_p));
+
+            cv::Mat jacobian_im_wrt_se2 = jacobian_pixel_wrt_xy * jacobian_xy_wrt_se2;
+
+            assert(jacobian_im_wrt_se2.rows = 1);
+            assert(jacobian_im_wrt_se2.cols = 3);
+            jacobian.at<float>(count, 0) = -jacobian_im_wrt_se2.at<float>(0, 0);
+            jacobian.at<float>(count, 1) = -jacobian_im_wrt_se2.at<float>(0, 1);
+            jacobian.at<float>(count, 2) = -jacobian_im_wrt_se2.at<float>(0, 2);
             ++count;
         }
     }
@@ -114,7 +159,7 @@ cv::Mat LucasKanada::compute_jacobian(const cv::Point2f &velocity,
 }
 
 
-cv::Mat LucasKanada::compute_b(const cv::Point2f &velocity, const cv::Point2f &loc, const cv::Mat &source,
+cv::Mat LucasKanada::compute_b(const Velocity &velocity, const cv::Point2f &loc, const cv::Mat &source,
                                const cv::Mat &target) {
     /// residual function的一行是A的一个像素差， 和移动过的B的一个像素的差
     const int patch_size = (half_window_size_ * 2 + 1) * (half_window_size_ * 2 + 1);
@@ -123,10 +168,14 @@ cv::Mat LucasKanada::compute_b(const cv::Point2f &velocity, const cv::Point2f &l
     size_t count = 0;
     for(float y = loc.y - half_window_size_; y <= loc.y + half_window_size_ + 1e-6; y+=1.0F){
         for(float x = loc.x - half_window_size_; x <= loc.x + half_window_size_ + 1e-6; x+=1.0F){
-            const float last_x = x + velocity.x;
-            const float last_y = y + velocity.y;
+//            const float last_x = x + velocity.x;
+//            const float last_y = y + velocity.y;
+//
+//            b.at<float>(count, 0) = bilinear_interp(target, {x, y}) - bilinear_interp(source, {last_x, last_y});
+//            ++count;
 
-            b.at<float>(count, 0) = bilinear_interp(target, {x, y}) - bilinear_interp(source, {last_x, last_y});
+            cv::Point2f delta(x-loc.x, y-loc.y);
+            b.at<float>(count, 0) = bilinear_interp(target, {x,y}) - bilinear_interp(source, velocity.apply(delta) + loc);
             ++count;
         }
     }
@@ -165,12 +214,15 @@ float LucasKanada::bilinear_interp(const cv::Mat &img, const cv::Point2f &pt) {
 }
 
 
-cv::Point2f LucasKanada::solve_normal_equation(const cv::Mat &jacobian, const cv::Mat &b) {
+Velocity LucasKanada::solve_normal_equation(const cv::Mat &jacobian, const cv::Mat &b) {
 
     cv::Mat_<float> delta;
     // J^T J delta = -J^T b
 
     cv::solve(jacobian, -b, delta, cv::DECOMP_CHOLESKY | cv::DECOMP_NORMAL);
 
-    return { delta.at<float>(0, 0), delta.at<float>(1, 0) };
+    assert(delta.rows == 3);
+    assert(delta.cols == 1);
+
+    return {delta.at<float>(0, 0), delta.at<float>(1, 0), delta.at<float>(2, 0)};
 }
